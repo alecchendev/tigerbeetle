@@ -466,6 +466,7 @@ pub fn ReplType(comptime MessageBus: type) type {
 
         client: *Client,
         printer: Printer,
+        history: std.ArrayList([]const u8),
 
         const Repl = @This();
 
@@ -516,21 +517,98 @@ pub fn ReplType(comptime MessageBus: type) type {
             }
         }
 
+        const prompt = "> ";
         const single_repl_input_max = 10 * 4 * 1024;
+
+        fn redrawBuffer(repl: *Repl, old_buffer_len: usize, buffer: []const u8) !void {
+            const backspace_len = prompt.len + old_buffer_len;
+            // TODO: Ridiculously large..?
+            var backspace_buffer: [single_repl_input_max]u8 = undefined;
+            @memset(backspace_buffer[0..backspace_len], std.ascii.control_code.bs);
+            const backspace_slice = backspace_buffer[0..backspace_len];
+            try repl.printer.print("\x1b\x5b\x32\x4b{s}{s}{s}", .{ backspace_slice, prompt, buffer });
+        }
+
+        fn readUntilDelimiterOrEofAlloc(
+            repl: *Repl,
+            allocator: std.mem.Allocator,
+            reader: std.io.AnyReader,
+            delimiter: u8,
+        ) !?[]u8 {
+            var history_idx = if (repl.history.items.len > 0) repl.history.items.len else 0;
+
+            // Cache for the latest entry, so we can remember
+            // it when we go up and down the history.
+            var latest_buffer = std.ArrayList(u8).init(allocator);
+            defer latest_buffer.deinit();
+            var curr_buffer = std.ArrayList(u8).init(allocator);
+            defer curr_buffer.deinit();
+            while (curr_buffer.items.len < single_repl_input_max) {
+                const user_input = (try UserInput.parse(reader)).?;
+                switch (user_input) {
+                    UserInput.ascii => |input| {
+                        if (input.char == delimiter) {
+                            return try curr_buffer.toOwnedSlice();
+                        }
+                        try curr_buffer.append(input.char);
+                    },
+                    UserInput.up => {
+                        if (history_idx > 0) {
+                            if (history_idx == repl.history.items.len) {
+                                latest_buffer.clearRetainingCapacity();
+                                try latest_buffer.appendSlice(curr_buffer.items);
+                            }
+                            history_idx -= 1;
+                            curr_buffer.clearRetainingCapacity();
+                            try curr_buffer.appendSlice(repl.history.items[history_idx]);
+                        }
+                        const escape_bytes = 4;
+                        const old_buffer_len = curr_buffer.items.len + escape_bytes;
+                        try repl.redrawBuffer(old_buffer_len, curr_buffer.items);
+                    },
+                    UserInput.down => {
+                        if (history_idx < repl.history.items.len) {
+                            history_idx += 1;
+                            if (history_idx == repl.history.items.len) {
+                                curr_buffer.clearRetainingCapacity();
+                                try curr_buffer.appendSlice(latest_buffer.items);
+                            } else {
+                                curr_buffer.clearRetainingCapacity();
+                                try curr_buffer.appendSlice(repl.history.items[history_idx]);
+                            }
+                        }
+                        const escape_bytes = 4;
+                        const old_buffer_len = curr_buffer.items.len + escape_bytes;
+                        try repl.redrawBuffer(old_buffer_len, curr_buffer.items);
+                    },
+                    UserInput.left => {},
+                    UserInput.right => {},
+                    UserInput.unknown => {},
+                }
+            }
+            return error.StreamTooLong;
+        }
+
         fn do_repl(
             repl: *Repl,
             arena: *std.heap.ArenaAllocator,
         ) !void {
-            try repl.printer.print("> ", .{});
+            try repl.printer.print(prompt, .{});
 
             const stdin = std.io.getStdIn();
+            const original_termios = try std.posix.tcgetattr(stdin.handle);
+            defer std.posix.tcsetattr(stdin.handle, .FLUSH, original_termios) catch {};
+
+            var termios = original_termios;
+            termios.lflag.ICANON = false;
+            try std.posix.tcsetattr(stdin.handle, .FLUSH, termios);
             var stdin_buffered_reader = std.io.bufferedReader(stdin.reader());
             var stdin_stream = stdin_buffered_reader.reader();
 
-            const input = stdin_stream.readUntilDelimiterOrEofAlloc(
+            const input = repl.readUntilDelimiterOrEofAlloc(
                 arena.allocator(),
-                ';',
-                single_repl_input_max,
+                stdin_stream.any(),
+                '\n', // TODO: windows -> carriage return?
             ) catch |err| {
                 repl.event_loop_done = true;
                 return err;
@@ -539,6 +617,11 @@ pub fn ReplType(comptime MessageBus: type) type {
                 repl.event_loop_done = true;
                 try repl.fail("\nExiting.\n", .{});
                 return;
+            };
+
+            repl.history.append(input) catch |err| {
+                repl.event_loop_done = true;
+                return err;
             };
 
             const statement = Parser.parse_statement(
@@ -617,6 +700,7 @@ pub fn ReplType(comptime MessageBus: type) type {
                 .request_done = true,
                 .event_loop_done = false,
                 .interactive = statements.len == 0,
+                .history = std.ArrayList([]const u8).init(allocator),
                 .printer = .{
                     .stderr = std.io.getStdErr().writer(),
                     .stdout = std.io.getStdOut().writer(),
@@ -923,6 +1007,44 @@ pub fn ReplType(comptime MessageBus: type) type {
         }
     };
 }
+
+const UserInput = union(enum) {
+    up,
+    down,
+    left,
+    right,
+    ascii: struct { char: u8 },
+    unknown,
+
+    fn readByte(reader: std.io.AnyReader) !?u8 {
+        return reader.readByte() catch |err| switch (err) {
+            error.EndOfStream => null,
+            else => |e| return e,
+        };
+    }
+
+    pub fn parse(reader: std.io.AnyReader) !?UserInput {
+        const byte = (try readByte(reader)).?;
+        switch (byte) {
+            '\x1b' => {
+                const second_byte = (try readByte(reader)).?;
+                if (second_byte == '[') {
+                    const third_byte = (try readByte(reader)).?;
+                    switch (third_byte) {
+                        'A' => return UserInput.up,
+                        'B' => return UserInput.down,
+                        'C' => return UserInput.right,
+                        'D' => return UserInput.left,
+                        else => return UserInput.unknown,
+                    }
+                } else {
+                    return UserInput.unknown;
+                }
+            },
+            else => return UserInput{ .ascii = .{ .char = byte } },
+        }
+    }
+};
 
 const null_printer = Printer{
     .stderr = null,
