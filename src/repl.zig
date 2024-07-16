@@ -520,13 +520,9 @@ pub fn ReplType(comptime MessageBus: type) type {
         const prompt = "> ";
         const single_repl_input_max = 10 * 4 * 1024;
 
-        fn redrawBuffer(repl: *Repl, old_buffer_len: usize, buffer: []const u8) !void {
-            const backspace_len = prompt.len + old_buffer_len;
-            // TODO: Ridiculously large..?
-            var backspace_buffer: [single_repl_input_max]u8 = undefined;
-            @memset(backspace_buffer[0..backspace_len], std.ascii.control_code.bs);
-            const backspace_slice = backspace_buffer[0..backspace_len];
-            try repl.printer.print("\x1b\x5b\x32\x4b{s}{s}{s}", .{ backspace_slice, prompt, buffer });
+        fn redrawBuffer(repl: *Repl, buffer: []const u8) !void {
+            const clear_line = "\x1b\x5b\x32\x4b";
+            try repl.printer.print("{s}{s}{s}{s}", .{ clear_line, "\r", prompt, buffer });
         }
 
         fn readUntilDelimiterOrEofAlloc(
@@ -562,9 +558,7 @@ pub fn ReplType(comptime MessageBus: type) type {
                             curr_buffer.clearRetainingCapacity();
                             try curr_buffer.appendSlice(repl.history.items[history_idx]);
                         }
-                        const escape_bytes = 4;
-                        const old_buffer_len = curr_buffer.items.len + escape_bytes;
-                        try repl.redrawBuffer(old_buffer_len, curr_buffer.items);
+                        try repl.redrawBuffer(curr_buffer.items);
                     },
                     UserInput.down => {
                         if (history_idx < repl.history.items.len) {
@@ -577,9 +571,7 @@ pub fn ReplType(comptime MessageBus: type) type {
                                 try curr_buffer.appendSlice(repl.history.items[history_idx]);
                             }
                         }
-                        const escape_bytes = 4;
-                        const old_buffer_len = curr_buffer.items.len + escape_bytes;
-                        try repl.redrawBuffer(old_buffer_len, curr_buffer.items);
+                        try repl.redrawBuffer(curr_buffer.items);
                     },
                     UserInput.left => {},
                     UserInput.right => {},
