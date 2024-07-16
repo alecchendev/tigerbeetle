@@ -536,9 +536,7 @@ pub fn ReplType(comptime MessageBus: type) type {
             // Cache for the latest entry, so we can remember
             // it when we go up and down the history.
             var latest_buffer = std.ArrayList(u8).init(allocator);
-            defer latest_buffer.deinit();
             var curr_buffer = std.ArrayList(u8).init(allocator);
-            defer curr_buffer.deinit();
             while (curr_buffer.items.len < single_repl_input_max) {
                 const user_input = (try UserInput.parse(reader)).?;
                 switch (user_input) {
@@ -618,7 +616,11 @@ pub fn ReplType(comptime MessageBus: type) type {
                 return;
             };
 
-            repl.history.append(input) catch |err| {
+            // Copy input using history's allocator so it
+            // doesn't get deallocated when the current statement is done.
+            const input_copy = try repl.history.allocator.alloc(u8, input.len);
+            @memcpy(input_copy, input);
+            repl.history.append(input_copy) catch |err| {
                 repl.event_loop_done = true;
                 return err;
             };
