@@ -543,6 +543,8 @@ pub fn ReplType(comptime MessageBus: type) type {
                 const user_input = (try UserInput.parse(reader)).?;
                 switch (user_input) {
                     UserInput.ascii => |input| {
+                        // Draw manually since we turned off ECHO flag
+                        try repl.printer.print("{c}", .{input.char});
                         if (input.char == delimiter) {
                             return try curr_buffer.toOwnedSlice();
                         }
@@ -597,6 +599,7 @@ pub fn ReplType(comptime MessageBus: type) type {
 
             var termios = original_termios;
             termios.lflag.ICANON = false;
+            termios.lflag.ECHO = false;
             try std.posix.tcsetattr(stdin.handle, .FLUSH, termios);
             var stdin_buffered_reader = std.io.bufferedReader(stdin.reader());
             var stdin_stream = stdin_buffered_reader.reader();
