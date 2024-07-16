@@ -575,6 +575,10 @@ pub fn ReplType(comptime MessageBus: type) type {
                     },
                     UserInput.left => {},
                     UserInput.right => {},
+                    UserInput.backspace => {
+                        try repl.printer.print("\x08 \x08", .{});
+                        _ = curr_buffer.pop();
+                    },
                     UserInput.unknown => {},
                 }
             }
@@ -1005,6 +1009,7 @@ const UserInput = union(enum) {
     down,
     left,
     right,
+    backspace,
     ascii: struct { char: u8 },
     unknown,
 
@@ -1033,6 +1038,7 @@ const UserInput = union(enum) {
                     return UserInput.unknown;
                 }
             },
+            '\x7f' => return UserInput.backspace,
             else => return UserInput{ .ascii = .{ .char = byte } },
         }
     }
